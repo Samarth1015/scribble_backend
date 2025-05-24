@@ -8,4 +8,5 @@ export interface GameRoom {
   currentDrawerIndex: number;
   wordToGuess: string;
   guessedCorrectly: Set<string>;
+  points: Map<string, number>;
 }

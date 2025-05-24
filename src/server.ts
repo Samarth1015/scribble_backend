@@ -44,6 +44,27 @@ function generateRandomWords(): string[] {
   return shuffled.slice(0, 3); // Let drawer choose from 3 options
 }
 
+function resetGameRoom(gameRoom: GameRoom) {
+  // Reset game state
+  gameRoom.wordToGuess = "";
+  gameRoom.guessedCorrectly.clear();
+
+  // Rotate to next drawer
+  gameRoom.currentDrawerIndex =
+    (gameRoom.currentDrawerIndex + 1) % gameRoom.players.length;
+
+  // Start new round
+  const drawer = gameRoom.players[gameRoom.currentDrawerIndex];
+  io.to(String(drawer.socketId)).emit("choose_word", {
+    words: generateRandomWords(),
+  });
+
+  io.to(String(gameRoom.roomNo)).emit("game_ready", {
+    drawer: drawer.name,
+    sockeId: drawer.socketId,
+  });
+}
+
 io.on("connection", (socket) => {
   // drawing socket connection
   socket.on("draw", (data) => {
@@ -79,6 +100,7 @@ io.on("connection", (socket) => {
             currentDrawerIndex: randomDrawerIndex,
             wordToGuess: "",
             guessedCorrectly: new Set(),
+            points: new Map(),
           };
 
           gameRooms.push(newGameRoom);
@@ -139,36 +161,114 @@ io.on("connection", (socket) => {
     }
   });
 
+  // socket.on("correct_guess", ({ socketId, roomNo }) => {
+  //   const gameRoom = gameRooms.find((room) => room.roomNo === roomNo);
+  //   console.log("calling insdie correct guess", gameRoom);
+  //   if (gameRoom) {
+  //     gameRoom.guessedCorrectly.add(socketId);
+  //     console.log("--->", gameRoom.guessedCorrectly.size);
+  //     if (gameRoom.guessedCorrectly.size === gameRoom.players.length - 1) {
+  //       io.to(String(roomNo)).emit("game_over", { points: gameRoom.points });
+  //     } else {
+  //       gameRoom.points.set(socketId, (gameRoom.points.get(socketId) || 0) + 1);
+  //     }
+  //   }
+  // });
+
   //chat functionality
   socket.on(
     "chat_message",
-    (msg: { name: string; roomNo: number; message: string }) => {
+    (msg: {
+      name: string;
+      roomNo: number;
+      message: string;
+      isCorrect: Boolean;
+    }) => {
+      if (msg.isCorrect) {
+        const gameRoom = gameRooms.find((room) => room.roomNo === msg.roomNo);
+        if (gameRoom) {
+          gameRoom.guessedCorrectly.add(socket.id);
+          const currentPoints = gameRoom.points.get(socket.id) || 0;
+          gameRoom.points.set(socket.id, currentPoints + 1);
+
+          // Emit points update to all players in the room
+          io.to(String(msg.roomNo)).emit("points_update", {
+            points: gameRoom.points,
+          });
+
+          if (gameRoom.guessedCorrectly.size === gameRoom.players.length - 1) {
+            console.log("points", gameRoom.points);
+            io.to(String(msg.roomNo)).emit("game_over", {
+              points: gameRoom.points,
+            });
+            // Reset the game room for next round
+            resetGameRoom(gameRoom);
+          }
+        }
+      }
       io.to(String(msg.roomNo)).emit("chat_message", msg);
     }
   );
 
   socket.on("disconnect", () => {
-    // console.log(socket.id, "got disconnected");
-
+    // Find and remove player from playerRoomRelatedInfo
     for (let i = 0; i < playerRoomRelatedInfo.length; i++) {
       const room = playerRoomRelatedInfo[i];
       const index = room.findIndex((player) => player.socketId === socket.id);
 
       if (index !== -1) {
         const removedPlayer = room.splice(index, 1)[0];
+        const roomNo = removedPlayer.roomNo;
 
-        // console.log(
-        //   `Removed ${removedPlayer.name} from room ${removedPlayer.roomNo}`
-        // );
+        // Remove player from game room
+        const gameRoom = gameRooms.find((room) => room.roomNo === roomNo);
+        if (gameRoom) {
+          // Remove player from game room
+          const playerIndex = gameRoom.players.findIndex(
+            (player) => player.socketId === socket.id
+          );
+          if (playerIndex !== -1) {
+            gameRoom.players.splice(playerIndex, 1);
 
-        io.to(String(removedPlayer.roomNo)).emit("player_left", {
+            // If the drawer disconnected, assign a new drawer
+            if (playerIndex === gameRoom.currentDrawerIndex) {
+              if (gameRoom.players.length > 0) {
+                gameRoom.currentDrawerIndex = 0; // Set first remaining player as drawer
+                const newDrawer = gameRoom.players[0];
+                io.to(String(newDrawer.socketId)).emit("choose_word", {
+                  words: generateRandomWords(),
+                });
+              }
+            }
+
+            // Remove player from points and guessed correctly
+            gameRoom.points.delete(socket.id);
+            gameRoom.guessedCorrectly.delete(socket.id);
+
+            // If only one player remains, end the game
+            if (gameRoom.players.length <= 1) {
+              io.to(String(roomNo)).emit("game_over", {
+                points: gameRoom.points,
+                message: "Game ended due to insufficient players",
+              });
+              // Remove the game room
+              const gameRoomIndex = gameRooms.findIndex(
+                (room) => room.roomNo === roomNo
+              );
+              if (gameRoomIndex !== -1) {
+                gameRooms.splice(gameRoomIndex, 1);
+              }
+            }
+          }
+        }
+
+        io.to(String(roomNo)).emit("player_left", {
           name: removedPlayer.name,
-          roomNo: removedPlayer.roomNo,
+          roomNo: roomNo,
         });
 
         if (room.length === 0) {
           playerRoomRelatedInfo.splice(i, 1);
-          // console.log(`Room ${removedPlayer.roomNo} is now empty and removed`);
         }
 
         break;
